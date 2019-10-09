@@ -19,7 +19,6 @@ Public Class Serializer
         Dim ref() As Byte, value() As Byte, hash() As Byte
         Using bw As New BinaryWriter(File.Open(filename, FileMode.Create))
             bw.Write(Serializer.Header)
-            Dim d = Serializer.CollectProperties(instance)
             For Each cv In Serializer.CollectProperties(instance)
                 bw.Write(CByte(cv.Type))
                 ref = Serializer.Compress(cv.Reference)
