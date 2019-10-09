@@ -3,7 +3,6 @@ Imports System.Text
 Imports System.Reflection
 Imports System.Globalization
 Imports System.Security.Cryptography
-Imports Catonic.Ciphers
 
 Public Class Serializer
     Public Shared Property Encoder As Encoding = Encoding.UTF8
@@ -13,14 +12,18 @@ Public Class Serializer
     ''' </summary>
     ''' <param name="filename"></param>
     ''' <param name="instance"></param>
-    Public Shared Sub Export(filename As String, instance As Object, Optional scrambler As Scrambler = Scrambler.None)
+    Public Shared Sub Export(filename As String, instance As Object)
+        If (Not instance.GetType.GetConstructors.Where(Function(x) x.GetParameters.Count = 0).Any) Then
+            Throw New Exception("serializer requires a parameterless constructor")
+        End If
         Dim ref() As Byte, value() As Byte, hash() As Byte
         Using bw As New BinaryWriter(File.Open(filename, FileMode.Create))
             bw.Write(Serializer.Header)
+            Dim d = Serializer.CollectProperties(instance)
             For Each cv In Serializer.CollectProperties(instance)
                 bw.Write(CByte(cv.Type))
-                ref = Serializer.Scramble(cv.Reference, scrambler)
-                value = Serializer.Scramble(cv.Value, scrambler)
+                ref = Serializer.Compress(cv.Reference)
+                value = Serializer.Compress(cv.Value)
                 hash = Serializer.Hash(value)
                 bw.Write(ref.Length)
                 bw.Write(value.Length)
@@ -35,45 +38,48 @@ Public Class Serializer
     ''' </summary>
     ''' <typeparam name="T"></typeparam>
     ''' <param name="filename"></param>
-    ''' <param name="target"></param>
-    ''' <returns></returns>
-    Public Shared Function Import(Of T As New)(filename As String, target As T, Optional scrambler As Scrambler = Scrambler.None) As T
+    ''' <returns>T</returns>
+    Public Shared Function Import(Of T As New)(filename As String) As T
         If (File.Exists(filename)) Then
+            If (Not GetType(T).GetConstructors.Where(Function(x) x.GetParameters.Count = 0).Any) Then
+                Throw New Exception("serializer requires a parameterless constructor")
+            End If
+            Dim target As T = Activator.CreateInstance(Of T)
             Dim values As New List(Of CValue)
-            Using br As New BinaryReader(File.Open(filename, FileMode.Open))
+                Using br As New BinaryReader(File.Open(filename, FileMode.Open))
 
-                If (br.ReadBytes(2).SequenceEqual(Serializer.Header)) Then
+                    If (br.ReadBytes(2).SequenceEqual(Serializer.Header)) Then
 
-                    Dim dt, h() As Byte, r, v As String, l1, l2 As Int32
-                    Do While br.BaseStream.Position + &H29 < br.BaseStream.Length
-                        dt = br.ReadByte
-                        l1 = br.ReadInt32
-                        l2 = br.ReadInt32
-                        h = br.ReadBytes(32)
+                        Dim dt, h() As Byte, r, v As String, l1, l2 As Int32
+                        Do While br.BaseStream.Position + &H29 < br.BaseStream.Length
+                            dt = br.ReadByte
+                            l1 = br.ReadInt32
+                            l2 = br.ReadInt32
+                            h = br.ReadBytes(32)
 
-                        If ((br.BaseStream.Position + l1 + l2) > br.BaseStream.Length) Then
-                            Throw New Exception("length mismatch")
-                        End If
-
-                        r = Serializer.Descramble(br.ReadBytes(l1), scrambler)
-                        v = Serializer.Descramble(br.ReadBytes(l2), scrambler, h)
-
-                        values.Add(New CValue(r, v, CType(dt, CTypes)))
-                    Loop
-                    If (values.Any) Then
-                        For Each element As CValue In values
-                            Dim pdata As PropertyInfo = target.GetType.GetProperty(element.Reference)
-                            If (pdata Is Nothing) Then
-                                Throw New Exception("property reference mismatch")
+                            If ((br.BaseStream.Position + l1 + l2) > br.BaseStream.Length) Then
+                                Throw New Exception("length mismatch")
                             End If
-                            pdata.SetValue(target, Serializer.Convert(element.Type, element.Value))
-                        Next
+
+                            r = Serializer.Decompress(br.ReadBytes(l1))
+                            v = Serializer.Decompress(br.ReadBytes(l2), h)
+
+                            values.Add(New CValue(r, v, CType(dt, CTypes)))
+                        Loop
+                        If (values.Any) Then
+                            For Each element As CValue In values
+                                Dim pdata As PropertyInfo = target.GetType.GetProperty(element.Reference)
+                                If (pdata Is Nothing) Then
+                                    Throw New Exception("property reference mismatch")
+                                End If
+                                pdata.SetValue(target, Serializer.Convert(element.Type, element.Value))
+                            Next
+                        End If
+                        Return target
                     End If
-                    Return target
-                End If
-                Throw New Exception("header mismatch")
-            End Using
-        End If
+                    Throw New Exception("header mismatch")
+                End Using
+            End If
     End Function
     ''' <summary>
     ''' Create collection info from properties
@@ -101,16 +107,8 @@ Public Class Serializer
     ''' <param name="data"></param>
     ''' <param name="scrambler"></param>
     ''' <returns></returns>
-    Private Shared Function Scramble(data As String, scrambler As Scrambler) As Byte()
-        Select Case scrambler
-            Case Scrambler.Rot13
-                data = New Rot13().Input(data)
-            Case Scrambler.Rot47
-                data = New Rot47().Input(data)
-            Case Scrambler.Bifid
-                data = New Bifid().Input(data)
-        End Select
-        Return Serializer.Encoder.GetBytes(data)
+    Private Shared Function Compress(data As String) As Byte()
+        Return GZip.Compress(Serializer.Encoder.GetBytes(data))
     End Function
     ''' <summary>
     ''' Descrables scrambled text into readable format
@@ -119,20 +117,11 @@ Public Class Serializer
     ''' <param name="scrambler"></param>
     ''' <param name="hash"></param>
     ''' <returns></returns>
-    Private Shared Function Descramble(data() As Byte, scrambler As Scrambler, Optional hash() As Byte = Nothing) As String
+    Private Shared Function Decompress(data() As Byte, Optional hash() As Byte = Nothing) As String
         If (hash IsNot Nothing AndAlso Not hash.SequenceEqual(Serializer.Hash(data))) Then
             Throw New Exception("data hash mismatch")
         End If
-        Dim output As String = Serializer.Encoder.GetString(data)
-        Select Case scrambler
-            Case Scrambler.Rot13
-                output = New Rot13().Output(output)
-            Case Scrambler.Rot47
-                output = New Rot47().Output(output)
-            Case Scrambler.Bifid
-                output = New Bifid().Output(output)
-        End Select
-        Return output
+        Return Serializer.Encoder.GetString(GZip.Decompress(data))
     End Function
     ''' <summary>
     ''' Returns hash (SHA256) from data array
@@ -178,6 +167,32 @@ Public Class Serializer
                 Return Byte.Parse(value, Serializer.Culture)
             Case CTypes.SByte
                 Return SByte.Parse(value, Serializer.Culture)
+            Case CTypes.Strings
+                Return value.Split(Strings.ChrW(0))
+            Case CTypes.Integers
+                Dim values As New List(Of Integer)
+                For Each v In value.Split(Strings.ChrW(0))
+                    values.Add(Integer.Parse(v, Serializer.Culture))
+                Next
+                Return values.ToArray
+            Case CTypes.Doubles
+                Dim values As New List(Of Double)
+                For Each v In value.Split(Strings.ChrW(0))
+                    values.Add(Double.Parse(v, Serializer.Culture))
+                Next
+                Return values.ToArray
+            Case CTypes.Booleans
+                Dim values As New List(Of Boolean)
+                For Each v In value.Split(Strings.ChrW(0))
+                    values.Add(Boolean.Parse(v))
+                Next
+                Return values.ToArray
+            Case CTypes.Bytes
+                Dim values As New List(Of Byte)
+                For Each v In value.Split(Strings.ChrW(0))
+                    values.Add(Byte.Parse(v, Serializer.Culture))
+                Next
+                Return values.ToArray
         End Select
         Throw New Exception(String.Format("unsupported type '{0}'", type.ToString))
     End Function
@@ -214,6 +229,16 @@ Public Class Serializer
                 Return CTypes.Byte
             Case GetType(SByte)
                 Return CTypes.SByte
+            Case GetType(String())
+                Return CTypes.Strings
+            Case GetType(Integer())
+                Return CTypes.Integers
+            Case GetType(Double())
+                Return CTypes.Doubles
+            Case GetType(Boolean())
+                Return CTypes.Booleans
+            Case GetType(Byte())
+                Return CTypes.Bytes
         End Select
         Throw New Exception(String.Format("unsupported type '{0}'", datatype.Name))
     End Function

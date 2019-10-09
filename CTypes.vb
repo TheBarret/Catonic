@@ -12,4 +12,9 @@
     [Decimal]
     [Byte]
     [SByte]
+    [Strings]
+    [Integers]
+    [Doubles]
+    [Booleans]
+    [Bytes]
 End Enum
